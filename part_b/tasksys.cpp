@@ -159,18 +159,14 @@ void TaskSystemParallelThreadPoolSleeping::task_worker(int thread_id) {
 
                 // if all dependencies for this task are met, add it to the work queue
                 if (tasks_deps_left_[dep] == 0) {
-                    // move tasks for this launch from todo_queue_ to work_queue_
+                    // move tasks for this launch from todo_map_ to work_queue_
                     // there will be one work order in todo_queue_ for this launch, which will be expanded into individual work orders for each task in the launch
-                    for (auto it = todo_queue_.begin(); it != todo_queue_.end(); ++it) {
-                        if (it->launch_id_ == dep) {
-                            for (int i = 0; i < it->num_total_tasks_; i++) {
-                                WorkOrder individual_work_order(dep, i, it->runnable_, it->num_total_tasks_);
-                                work_queue_.push_back(individual_work_order);
-                            }
-                            todo_queue_.erase(it);
-                            break;
-                        }
+                    WorkOrder launch_work_order = todo_map_[dep];
+                    for (int i=0; i<launch_work_order.num_total_tasks_; i++) {
+                        WorkOrder individual_work_order(dep, i, launch_work_order.runnable_, launch_work_order.num_total_tasks_);
+                        work_queue_.push_back(individual_work_order);
                     }
+                    todo_map_.erase(dep);
 
                     work_todo_->notify_all();
                 }
@@ -206,10 +202,9 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     num_launches_completed = 0;
     stop_threads_ = false;
     completed_tasks_ = std::vector<bool>();
-    todo_queue_ = std::vector<WorkOrder>();
+    todo_map_ = std::unordered_map<TaskID, WorkOrder>();
     work_queue_ = std::vector<WorkOrder>();
 
-    // thread 0 will be the controller thread, and the rest will be worker threads
     for (int i = 0; i < num_threads_; i++) {
         threads_[i] = std::thread(&TaskSystemParallelThreadPoolSleeping::task_worker, this, i);
     }
@@ -302,7 +297,7 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
         // only create one work order for this task, and add it to the todo queue
         // when moving to work_queue create individual work orders for each task
         WorkOrder individual_work_order(task_id, -1, runnable, num_total_tasks);
-        todo_queue_.push_back(individual_work_order);
+        todo_map_[task_id] = individual_work_order;
         tasks_deps_left_.push_back(tasks_deps_not_ready);
         for (TaskID dep : deps) {
             tasks_deps_[dep].push_back(task_id);

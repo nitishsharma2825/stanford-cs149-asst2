@@ -5,6 +5,7 @@
 
 #include <thread>
 #include <set>
+#include <map>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -84,10 +85,11 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         // there is work in the work_queue_ to be done
         std::condition_variable* work_todo_;
 
-        // all work done if completed_tasks_.size() == num_tasks_requested
+        // all work done signal
         std::condition_variable* work_done_;
 
-        std::vector<WorkOrder> todo_queue_;
+        std::unordered_map<TaskID, WorkOrder> todo_map_;
+
         std::vector<WorkOrder> work_queue_;
 
         // for each launch of tasks, how many tasks are left to be completed
@@ -115,6 +117,7 @@ class WorkOrder {
         int task_id_;
         IRunnable* runnable_;
         int num_total_tasks_;
+        WorkOrder() : launch_id_(0), task_id_(-1), runnable_(nullptr), num_total_tasks_(0) {}
         WorkOrder(TaskID launch_id, int task_id, IRunnable* runnable, int num_total_tasks) {
             launch_id_ = launch_id;
             task_id_ = task_id;
