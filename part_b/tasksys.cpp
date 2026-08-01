@@ -126,6 +126,75 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
     return "Parallel + Thread Pool + Sleep";
 }
 
+void TaskSystemParallelThreadPoolSleeping::task_worker(int thread_id) {
+    while (true) {
+        // check if there is work to do
+        std::unique_lock<std::mutex> lock(*mutex_);
+        while(work_queue_.empty() && !stop_threads_) {
+            work_todo_->wait(lock);
+        }
+
+        if (stop_threads_) {
+            break;
+        }
+
+        // get the next work order
+        WorkOrder work_order = work_queue_.back();
+        work_queue_.pop_back();
+        lock.unlock();
+
+        // execute the work order
+        for (int task_id = 0; task_id < work_order.num_total_tasks_; task_id++) {
+            work_order.runnable_->runTask(task_id, work_order.num_total_tasks_);
+        }
+
+        lock.lock();
+        completed_tasks_.insert(work_order.task_id_);
+        if (completed_tasks_.size() == num_tasks_requested) {
+            work_done_->notify_all();
+        } else {
+            check_for_work_->notify_all();
+        }
+        lock.unlock();
+    }
+}
+
+void TaskSystemParallelThreadPoolSleeping::task_controller(int thread_id) {
+    while (true) {
+        std::unique_lock<std::mutex> lock(*mutex_);
+        while (todo_queue_.empty() && !stop_threads_) {
+            check_for_work_->wait(lock);
+        }
+
+        if (stop_threads_) {
+            break;
+        }
+
+        // check if any work orders can be moved to the work queue
+        for (auto it = todo_queue_.begin(); it != todo_queue_.end();) {
+            WorkOrder work_order = *it;
+            bool all_deps_completed = true;
+            for (TaskID dep : work_order.deps_) {
+                if (completed_tasks_.find(dep) == completed_tasks_.end()) {
+                    all_deps_completed = false;
+                    break;
+                }
+            }
+            if (all_deps_completed) {
+                work_queue_.push_back(work_order);
+                it = todo_queue_.erase(it);
+                work_todo_->notify_all();
+            } else {
+                ++it;
+            }
+        }
+
+        if (completed_tasks_.size() == num_tasks_requested) {
+            work_done_->notify_all();
+        }
+    }
+}
+
 TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): ITaskSystem(num_threads) {
     //
     // TODO: CS149 student implementations may decide to perform setup
@@ -133,6 +202,27 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    num_threads_ = num_threads;
+    threads_ = new std::thread[num_threads_];
+    mutex_ = new std::mutex();
+    work_todo_ = new std::condition_variable();
+    work_done_ = new std::condition_variable();
+    check_for_work_ = new std::condition_variable();
+    cur_task_id_ = 0;
+    num_tasks_requested = 0;
+    stop_threads_ = false;
+    completed_tasks_ = std::set<TaskID>();
+    todo_queue_ = std::vector<WorkOrder>();
+    work_queue_ = std::vector<WorkOrder>();
+
+    // thread 0 will be the controller thread, and the rest will be worker threads
+    for (int i = 0; i < num_threads_; i++) {
+        if (i == 0) {
+            threads_[i] = std::thread(&TaskSystemParallelThreadPoolSleeping::task_controller, this, i);
+        } else {
+            threads_[i] = std::thread(&TaskSystemParallelThreadPoolSleeping::task_worker, this, i);
+        }
+    }
 }
 
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
@@ -142,6 +232,27 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    mutex_->lock();
+    stop_threads_ = true;
+    mutex_->unlock();
+
+    work_todo_->notify_all();
+    check_for_work_->notify_all();
+
+    num_tasks_requested = 0;
+    completed_tasks_.clear();
+    todo_queue_.clear();
+    work_queue_.clear();
+
+    for (int i = 0; i < num_threads_; i++) {
+        threads_[i].join();
+    }
+
+    delete[] threads_;
+    delete mutex_;
+    delete work_todo_;
+    delete work_done_;
+    delete check_for_work_;
 }
 
 void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_total_tasks) {
@@ -152,9 +263,16 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     // method in Parts A and B.  The implementation provided below runs all
     // tasks sequentially on the calling thread.
     //
+    std::unique_lock<std::mutex> lock(*mutex_);
+    num_tasks_requested += 1;
+    TaskID task_id = cur_task_id_++;
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    WorkOrder work_order(task_id, runnable, num_total_tasks, std::vector<TaskID>());
+    work_queue_.push_back(work_order);
+    work_todo_->notify_all();
+
+    while (completed_tasks_.size() < num_tasks_requested) {
+        work_done_->wait(lock);
     }
 }
 
@@ -165,12 +283,32 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
     //
     // TODO: CS149 students will implement this method in Part B.
     //
+    mutex_->lock();
+    num_tasks_requested += 1;
+    TaskID task_id = cur_task_id_++;
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    // check if all dependencies are completed
+    bool all_deps_completed = true;
+    for (TaskID dep : deps) {
+        if (completed_tasks_.find(dep) == completed_tasks_.end()) {
+            all_deps_completed = false;
+            break;
+        }
     }
 
-    return 0;
+    WorkOrder work_order(task_id, runnable, num_total_tasks, deps);
+
+    if (all_deps_completed) {
+        // add to work queue
+        work_queue_.push_back(work_order);
+        work_todo_->notify_all();
+    } else {
+        // add to todo queue
+        todo_queue_.push_back(work_order);
+    }
+
+    mutex_->unlock();
+    return task_id;
 }
 
 void TaskSystemParallelThreadPoolSleeping::sync() {
@@ -178,6 +316,9 @@ void TaskSystemParallelThreadPoolSleeping::sync() {
     //
     // TODO: CS149 students will modify the implementation of this method in Part B.
     //
-
+    std::unique_lock<std::mutex> lock(*mutex_);
+    while (completed_tasks_.size() < num_tasks_requested) {
+        work_done_->wait(lock);
+    }
     return;
 }
