@@ -78,7 +78,6 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         int cur_task_id_;
         std::thread* threads_;
         void task_worker(int thread_id);
-        void task_controller(int thread_id);
 
         std::mutex* mutex_;
 
@@ -88,15 +87,21 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         // all work done if completed_tasks_.size() == num_tasks_requested
         std::condition_variable* work_done_;
 
-        // check if there is work to do after this work order is completed, signal controller to wake up and check if there is work to do
-        std::condition_variable* check_for_work_;
-
         std::vector<WorkOrder> todo_queue_;
         std::vector<WorkOrder> work_queue_;
 
-        std::set<TaskID> completed_tasks_;
+        // for each launch of tasks, how many tasks are left to be completed
+        std::vector<int> tasks_per_launch_left_;
 
-        int num_tasks_requested;
+        // how many tasks I am dependent on that are left to be completed before I can be launched
+        std::vector<int> tasks_deps_left_;
+
+        // reverse dependency graph, for each task, which tasks are dependent on me
+        std::vector<std::vector<TaskID>> tasks_deps_;
+
+        std::vector<bool> completed_tasks_;
+        int num_launches_requested;
+        int num_launches_completed;
 
         bool stop_threads_;
 };
@@ -106,15 +111,15 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
  */
 class WorkOrder {
     public:
-        TaskID task_id_;
+        TaskID launch_id_;
+        int task_id_;
         IRunnable* runnable_;
         int num_total_tasks_;
-        std::vector<TaskID> deps_;
-        WorkOrder(TaskID task_id, IRunnable* runnable, int num_total_tasks, const std::vector<TaskID>& deps) {
+        WorkOrder(TaskID launch_id, int task_id, IRunnable* runnable, int num_total_tasks) {
+            launch_id_ = launch_id;
             task_id_ = task_id;
             runnable_ = runnable;
             num_total_tasks_ = num_total_tasks;
-            deps_ = deps;
         }
 };
 
